@@ -56,6 +56,11 @@ type BinaryFuseBuilder struct {
 //
 // The function may return an error if the set is empty.
 func BuildBinaryFuse[T Unsigned](b *BinaryFuseBuilder, keys []uint64) (BinaryFuse[T], error) {
+	f, _, err := buildBinaryFuse[T](b, keys)
+	return f, err
+}
+
+func buildBinaryFuse[T Unsigned](b *BinaryFuseBuilder, keys []uint64) (_ BinaryFuse[T], iterations int, _ error) {
 	size := uint32(len(keys))
 	var filter BinaryFuse[T]
 	filter.initializeParameters(b, size)
@@ -78,13 +83,32 @@ func BuildBinaryFuse[T Unsigned](b *BinaryFuseBuilder, keys []uint64) (BinaryFus
 	var h012 [6]uint32
 	// this could be used to compute the mod3
 	// tabmod3 := [5]uint8{0,1,2,0,1}
-	iterations := 0
 	for {
 		iterations += 1
 		if iterations > MaxIterations {
 			// The probability of this happening is lower than the cosmic-ray
 			// probability (i.e., a cosmic ray corrupts your system).
-			return BinaryFuse[T]{}, errors.New("too many iterations")
+			return BinaryFuse[T]{}, iterations, errors.New("too many iterations")
+		}
+		if size > 4 && size < 1_000_000 {
+			// The segment length is calculated using an empirical formula. For some
+			// sizes, the segment length is too large and leads to many iterations.
+			// Once every four iterations, use the previous segment length while
+			// keeping the same capacity. See TestBinaryFuseBoundarySizes.
+			switch iterations % 4 {
+			case 2:
+				// Switch to smaller segment size.
+				filter.SegmentLength /= 2
+				filter.SegmentLengthMask = filter.SegmentLength - 1
+				filter.SegmentCount = filter.SegmentCount*2 + 2
+				filter.SegmentCountLength = filter.SegmentCount * filter.SegmentLength
+			case 3:
+				// Restore the calculated segment size.
+				filter.SegmentLength *= 2
+				filter.SegmentLengthMask = filter.SegmentLength - 1
+				filter.SegmentCount = filter.SegmentCount/2 - 1
+				filter.SegmentCountLength = filter.SegmentCount * filter.SegmentLength
+			}
 		}
 
 		blockBits := 1
@@ -228,7 +252,7 @@ func BuildBinaryFuse[T Unsigned](b *BinaryFuseBuilder, keys []uint64) (BinaryFus
 		filter.Seed = splitmix64(&rngcounter)
 	}
 	if size == 0 {
-		return filter, nil
+		return filter, iterations, nil
 	}
 
 	for i := int(size - 1); i >= 0; i-- {
@@ -245,7 +269,7 @@ func BuildBinaryFuse[T Unsigned](b *BinaryFuseBuilder, keys []uint64) (BinaryFus
 		filter.Fingerprints[h012[found]] = xor2 ^ filter.Fingerprints[h012[found+1]] ^ filter.Fingerprints[h012[found+2]]
 	}
 
-	return filter, nil
+	return filter, iterations, nil
 }
 
 func (filter *BinaryFuse[T]) initializeParameters(b *BinaryFuseBuilder, size uint32) {
